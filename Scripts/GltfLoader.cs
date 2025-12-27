@@ -1,161 +1,116 @@
-using EVHelpers;
-using EVHelpers.Godot;
+using EVLibrary.FileIO;
 using Godot;
 using System;
-using System.Collections.Generic;
 using System.IO;
-using System.Linq;
+using SysFile = System.IO.File;
 
-public partial class GltfLoader
+namespace AM.ModelViewerTool
 {
-    public IReadOnlyDictionary<string, bool> FilePathNeedsReload => _filePathNeedsReload;
-    private Dictionary<string, bool> _filePathNeedsReload;
-    private GltfDocument _document = new GltfDocument();
-    private GltfState _state = new GltfState();
-    private string _loadedPath = string.Empty;
-
-    public Action<string> OnOpenedFileChanged;
-
-    public void Setup(string filePath)
+    public sealed class GltfLoader
     {
-        FileWatcherHelper.AddFileWatcherToList(
-            path: filePath,
-            filter: "*.blend",
-            notifyFilters: NotifyFilters.FileName | NotifyFilters.LastWrite | NotifyFilters.CreationTime,
-            includeSubdirectories: true,
-            enableRaisingEvents: true,
-            changeEvent: FileChanged,
-            createEvent: FileCreated,
-            deleteEvent: FileDeleted,
-            renameEvent: FileRenamed
+        private readonly Action<string> _openFileChangedCallback;
+        private readonly string _watchingBlenderFolderPath;
+        private readonly string _watchingGltfFolderPath;
+        private GltfDocument _document;
+        private GltfState _state;
+
+        public GltfLoader(string watchingBlenderFolderPath, string watchingGltfFolderPath, Action<string> openFileChangedCallback)
+        {
+            _openFileChangedCallback = openFileChangedCallback;
+            _watchingBlenderFolderPath = watchingBlenderFolderPath;
+            _watchingGltfFolderPath = watchingGltfFolderPath;
+            _document = new();
+            _state = new();
+
+            GD.Print($"FILE PATH = {_watchingBlenderFolderPath}");
+            GD.Print($"MODEL PATH = {_watchingGltfFolderPath}");
+
+            FileWatcherUtil.AddFileWatcherToList(
+                watcherKey: EWatcher.BASE_FOLDER,
+                path: _watchingBlenderFolderPath,
+                filter: FileExtension.BLEND.AsGenericFilter(),
+                notifyFilters: NotifyFilters.FileName | NotifyFilters.LastWrite | NotifyFilters.CreationTime,
+                includeSubdirectories: true,
+                enableRaisingEvents: true,
+                changeEvent: OnFileChanged,
+                createEvent: OnFileCreated,
+                deleteEvent: OnFileDeleted,
+                renameEvent: OnFileRenamed
             );
-        FileWatcherHelper.AddFileWatcherToList(
-            path: filePath,
-            filter: $"{filePath.GetFile()}",
-            changeEvent: LoadFileIntoScene
+            FileWatcherUtil.AddFileWatcherToList(
+                watcherKey: EWatcher.MODEL_FILE,
+                path: _watchingGltfFolderPath,
+                filter: FileExtension.GLTF.AsGenericFilter(),
+                changeEvent: OnLoadFileIntoScene
             );
-        _filePathNeedsReload = new Dictionary<string, bool>();
-        GD.Print(filePath);
-        string[] files = FileSearchHelper.SearchPathForFiles(path: filePath, searchPattern: "*.gltf").ToArray();
-        foreach (string file in files)
-        {
-            _filePathNeedsReload.Add(file, false);
         }
-        GodotPrintHelper.PrintDictionary(_filePathNeedsReload);
-    }
 
-    public void LoadFile(string path)
-    {
-        _document.AppendFromFile(path, _state);
-    }
-
-    public Node3D GenerateNode()
-    {
-        return (Node3D)_document.GenerateScene(_state);
-    }
-
-    public void Reset()
-    {
-        _loadedPath = string.Empty;
-        _filePathNeedsReload.Clear();
-        _document.Dispose();
-        _state.Dispose();
-        _document = new GltfDocument();
-        _state = new GltfState();
-    }
-
-    private void FileChanged(object sender, FileSystemEventArgs e)
-    {
-        if (e.ChangeType != WatcherChangeTypes.Changed) { return; }
-        if (!_filePathNeedsReload.ContainsKey(e.FullPath)) { return; }
-        _filePathNeedsReload[e.FullPath] = true;
-        if (_loadedPath == e.FullPath)
+        public void Cleanup()
         {
-            Reset();
-            LoadFile(e.FullPath);
-            _filePathNeedsReload[e.FullPath] = false;
+            // TODO: Make FileWatcherUtil's functionality here and in constructor into a new-up-able class that gets its setup (constructor potentially) / cleanup called by this.
+            // OR: Make a FileWatcherUtil.RemoveFileWatcherFromList function and use that here instead.
+            FileWatcherUtil.Cleanup();
         }
-        GD.Print($"{e.FullPath} CHANGED");
-        GodotPrintHelper.PrintDictionary(_filePathNeedsReload);
-        GenerateGltfFromBlendFile(e.FullPath.GetBaseName());
-    }
 
-    private void FileCreated(object sender, FileSystemEventArgs e)
-    {
-        if (e.ChangeType != WatcherChangeTypes.Created) { return; }
-        if (_filePathNeedsReload.ContainsKey(e.FullPath)) { return; }
-        _filePathNeedsReload.Add(e.FullPath, true);
-        if (_loadedPath == e.FullPath)
+        public void LoadFile(string path)
         {
-            LoadFile(e.FullPath);
-            _filePathNeedsReload[e.FullPath] = false;
+            if (!SysFile.Exists(path)) { return; }
+            _state.SetHandleBinaryImage((int)GltfState.HandleBinaryEmbedAsUncompressed);
+            Error err = _document.AppendFromFile(path, _state);
+            if (!err.Equals(Error.Ok))
+            {
+                GD.PrintErr(err);
+            }
         }
-        GD.Print($"{e.FullPath} CREATED");
-        GodotPrintHelper.PrintDictionary(_filePathNeedsReload);
-    }
 
-    private void LoadFileIntoScene(object sender, FileSystemEventArgs e)
-    {
-        OnOpenedFileChanged?.Invoke(e.FullPath);
-    }
-
-    private void FileDeleted(object sender, FileSystemEventArgs e)
-    {
-        if (e.ChangeType != WatcherChangeTypes.Deleted) { return; }
-        if (!_filePathNeedsReload.ContainsKey(e.FullPath)) { return; }
-        _filePathNeedsReload.Remove(e.FullPath);
-        if (_loadedPath == e.FullPath)
+        public Node3D GenerateNode()
         {
-            LoadFile(e.FullPath);
-            _filePathNeedsReload[e.FullPath] = false;
+            return (Node3D)_document.GenerateScene(_state);
         }
-        GD.Print($"{e.FullPath} DELETED");
-        GodotPrintHelper.PrintDictionary(_filePathNeedsReload);
-    }
 
-    private void FileRenamed(object sender, RenamedEventArgs e)
-    {
-        if (e.ChangeType != WatcherChangeTypes.Renamed) { return; }
-        if (_filePathNeedsReload.ContainsKey(e.OldFullPath))
+        public void Reset()
         {
-            _filePathNeedsReload.Remove(e.OldFullPath);
+            _document.Dispose();
+            _state.Dispose();
+            _document = new GltfDocument();
+            _state = new GltfState();
         }
-        if (e.FullPath.EndsWith(".gltf"))
-        {
-            _filePathNeedsReload.Add(e.FullPath, true);
-        }
-        if (_loadedPath == e.FullPath)
-        {
-            LoadFile(e.FullPath);
-            _filePathNeedsReload[e.FullPath] = false;
-        }
-        GD.Print($"Path:{e.OldFullPath} RENAMED to {e.FullPath}");
-        GodotPrintHelper.PrintDictionary(_filePathNeedsReload);
-        GenerateGltfFromBlendFile(e.FullPath.GetBaseName());
-    }
 
-    public void GenerateGltfFromBlendFile(string exportFilePath)
-    {
-        FileWatcherHelper.SetPathOfWatcherAtIndex(1, exportFilePath.GetBaseDir());
-        FileWatcherHelper.SetFilterAtIndex(1, $"*.gltf");
-        string pyScript = @$"import bpy
+        private void OnFileChanged(object sender, FileSystemEventArgs args)
+        {
+            if (args.FullPath.EndsWith(".blend1")) { return; }
+            if (args.ChangeType != WatcherChangeTypes.Changed) { return; }
+            GD.Print($"{args.FullPath} CHANGED");
+            GD.Print($"Making file at path {args.FullPath.GetBaseName()}");
+            GltfUtil.GenerateGltfFromBlendFile(args.FullPath.GetBaseName());
+        }
 
-bpy.ops.export_scene.gltf(
-    filepath = r""{exportFilePath}.gltf"",
-    check_existing = False,
-    export_format = 'GLTF_SEPARATE',
-    use_visible = True,
-    export_use_gltfpack = True
-)";
-        string pyFileDirectory = Path.GetTempPath() + @"BlenderImporterViewer";
-        Directory.CreateDirectory(pyFileDirectory);
-        File.WriteAllText(@$"{pyFileDirectory}\exportScript.py", pyScript);
-        string blenderPath = FileSearchHelper.FindExecutableInstallPath("Blender").SimplifyPath();
-        string blenderExportCommand = @$"blender -b ""{exportFilePath}.blend"" --python ""{pyFileDirectory}/exportScript.py""".Replace('/', '\\');
-        GD.Print("Generating GLTF file...");
-        GD.Print($"{blenderExportCommand}");
-        WindowsCmdHelper.RunCommandInBackground(blenderExportCommand, blenderPath, out string output, out string error);
-        GD.Print(output);
-        GD.Print(error);
+        private void OnFileCreated(object sender, FileSystemEventArgs args)
+        {
+            if (args.FullPath.EndsWith(".blend1")) { return; }
+            if (args.ChangeType != WatcherChangeTypes.Created) { return; }
+            GD.Print($"{args.FullPath} CREATED");
+        }
+
+        private void OnFileDeleted(object sender, FileSystemEventArgs args)
+        {
+            if (args.FullPath.EndsWith(".blend1")) { return; }
+            if (args.ChangeType != WatcherChangeTypes.Deleted) { return; }
+            GD.Print($"{args.FullPath} DELETED");
+        }
+
+        private void OnFileRenamed(object sender, RenamedEventArgs args)
+        {
+            if (args.FullPath.EndsWith(".blend1")) { return; }
+            if (args.ChangeType != WatcherChangeTypes.Renamed) { return; }
+            GD.Print($"Path:{args.OldFullPath} RENAMED to {args.FullPath}");
+            GD.Print(@$"Making file at path {args.FullPath.GetBaseName()}\{Path.GetFileNameWithoutExtension(args.FullPath)}.{GltfUtil.GLTF_FILE_EXTENSION_NAME}");
+            GltfUtil.GenerateGltfFromBlendFile(@$"{args.FullPath.GetBaseName()}\{Path.GetFileNameWithoutExtension(args.FullPath)}.{GltfUtil.GLTF_FILE_EXTENSION_NAME}");
+        }
+
+        private void OnLoadFileIntoScene(object sender, FileSystemEventArgs args)
+        {
+            _openFileChangedCallback?.Invoke(args.FullPath);
+        }
     }
 }
